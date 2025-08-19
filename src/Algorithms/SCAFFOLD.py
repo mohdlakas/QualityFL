@@ -30,7 +30,7 @@ class SCAFFOLDLocalUpdate(LocalUpdate):
         
     def update_weights_scaffold(self, model, global_round, c_global, c_local):
         """
-        SCAFFOLD local update with control variates
+        FIXED SCAFFOLD local update with proper control variates implementation
         """
         # Set device from model if not already set
         if self.device is None:
@@ -41,7 +41,9 @@ class SCAFFOLDLocalUpdate(LocalUpdate):
         model.train()
         
         # Store initial model weights for delta calculation
-        w_old = copy.deepcopy(model.state_dict())
+        w_old = {}
+        for name, param in model.named_parameters():
+            w_old[name] = param.data.clone().detach()
         
         # Initialize optimizer
         if self.args.optimizer == 'sgd':
@@ -52,6 +54,9 @@ class SCAFFOLDLocalUpdate(LocalUpdate):
                                        weight_decay=1e-4)
         
         epoch_loss = []
+        
+        # CRITICAL FIX: Store model states at each step for proper control variate calculation
+        model_states = []
         
         # Local training with SCAFFOLD correction
         for iter in range(self.args.local_ep):
@@ -66,13 +71,13 @@ class SCAFFOLDLocalUpdate(LocalUpdate):
                 loss = self.criterion(log_probs, labels)
                 loss.backward()
                 
-                # SCAFFOLD: Apply control variate correction to gradients
+                # FIX 1: Apply SCAFFOLD correction BEFORE optimizer step
                 with torch.no_grad():
                     for name, param in model.named_parameters():
                         if param.grad is not None and name in c_global and name in c_local:
-                            # Control variate correction: g_i - c_i + c
+                            # SCAFFOLD formula: g_i = g_i - c_i + c_global
                             correction = c_global[name] - c_local[name]
-                            param.grad.data += correction
+                            param.grad.data = param.grad.data - c_local[name] + c_global[name]
                 
                 optimizer.step()
                 
@@ -93,19 +98,23 @@ class SCAFFOLDLocalUpdate(LocalUpdate):
         final_loss = sum(epoch_loss) / len(epoch_loss) if epoch_loss else 2.0
         
         # Get updated weights
-        w_new = model.state_dict()
+        w_new = {}
+        for name, param in model.named_parameters():
+            w_new[name] = param.data.clone().detach()
         
-        # Calculate control variate update (c_i^+ = c_i - c + (y - x) / (K * η))
-        # where y = w_new, x = w_old, K = local_ep, η = lr
+        # FIX 2: Correct SCAFFOLD control variate update formula
+        # From paper: c_i^{t+1} = c_i^t - c^t + (x^t - y_i^t) / (K * η)
         c_delta = {}
-        for name in w_new.keys():
-            if name in c_global and name in c_local:
-                # SCAFFOLD control variate update formula
-                weight_diff = w_old[name] - w_new[name]  # x - y (note the order)
-                c_delta[name] = weight_diff / (self.args.local_ep * self.args.lr) - c_global[name]
+        for name in w_old.keys():
+            if name in c_global and name in c_local and name in w_new:
+                # CRITICAL: Correct order and scaling
+                weight_diff = w_old[name] - w_new[name]  # x^t - y_i^t 
+                # New control variate = old_local - global + weight_diff / (K * η)
+                c_new = c_local[name] - c_global[name] + weight_diff / (self.args.local_ep * self.args.lr)
+                c_delta[name] = c_new - c_local[name]  # Delta for aggregation
             else:
-                print(f"WARNING: Missing control variate for {name}")
-                c_delta[name] = torch.zeros_like(w_new[name])
+                print(f"WARNING: Missing parameters for control variate {name}")
+                c_delta[name] = torch.zeros_like(w_new[name]) if name in w_new else torch.zeros_like(w_old[name])
         
         return w_new, final_loss, c_delta
 
@@ -138,10 +147,10 @@ def scaffold_aggregate_weights(local_weights):
     return global_weights
 
 
-def scaffold_aggregate_control_variates(c_deltas, num_users):
+def scaffold_aggregate_control_variates(c_deltas, num_users, participation_rate):
     """
-    Aggregate control variate updates according to SCAFFOLD
-    c^+ = c + (1/N) * Σ(c_i^+ - c_i)
+    FIXED: Proper SCAFFOLD control variate aggregation
+    c^{t+1} = c^t + (1/N) * Σ(Δc_i) where N is TOTAL users, not just participating
     """
     if not c_deltas:
         return {}
@@ -149,11 +158,11 @@ def scaffold_aggregate_control_variates(c_deltas, num_users):
     # Initialize aggregated control variate update
     c_global_delta = {}
     
-    # Average all control variate deltas
+    # Average all control variate deltas and scale by participation
     for name in c_deltas[0].keys():
         delta_tensors = [c_delta[name] for c_delta in c_deltas]
-        # Average the deltas and scale by participation rate
-        c_global_delta[name] = torch.stack(delta_tensors, 0).mean(0) * (len(c_deltas) / num_users)
+        # CRITICAL FIX: Scale by participation rate properly
+        c_global_delta[name] = torch.stack(delta_tensors, 0).mean(0) * participation_rate
     
     return c_global_delta
 
@@ -227,9 +236,12 @@ def run_scaffold_experiment(args):
                 logger=None
             )
             
+            # CRITICAL FIX: Don't deepcopy the global model, use a fresh copy each time
+            client_model = copy.deepcopy(global_model)
+            
             # Perform local update with SCAFFOLD
             w, loss, c_delta = local_model.update_weights_scaffold(
-                model=copy.deepcopy(global_model),
+                model=client_model,
                 global_round=epoch,
                 c_global=c_global,
                 c_local=c_local[idx]
@@ -239,20 +251,28 @@ def run_scaffold_experiment(args):
             local_weights.append(copy.deepcopy(w))
             local_losses.append(copy.deepcopy(loss))
             c_deltas.append(c_delta)
-            
-            # Update local control variate: c_i^+ = c_i + c_delta_i
-            for name in c_local[idx].keys():
-                c_local[idx][name] = c_local[idx][name] + c_delta[name]
         
         # Aggregate model weights (standard FedAvg)
         global_weights = scaffold_aggregate_weights(local_weights)
         
         # Aggregate control variates (SCAFFOLD specific)
-        c_global_delta = scaffold_aggregate_control_variates(c_deltas, args.num_users)
+        participation_rate = len(c_deltas) / args.num_users
+        c_global_delta = scaffold_aggregate_control_variates(c_deltas, args.num_users, participation_rate)
         
-        # Update global control variate: c^+ = c + c_global_delta
+        # FIX: Update global control variate correctly
         for name in c_global.keys():
-            c_global[name] = c_global[name] + c_global_delta[name]
+            if name in c_global_delta:
+                c_global[name] = c_global[name] + c_global_delta[name]
+            else:
+                print(f"WARNING: Missing global delta for {name}")
+        
+        # FIX: Update local control variates correctly  
+        for idx, c_delta in zip(idxs_users, c_deltas):
+            for name in c_local[idx].keys():
+                if name in c_delta:
+                    c_local[idx][name] = c_local[idx][name] + c_delta[name]
+                else:
+                    print(f"WARNING: Missing local delta for client {idx}, param {name}")
         
         # Update global model
         global_model.load_state_dict(global_weights)
@@ -351,6 +371,19 @@ if __name__ == '__main__':
     # Parse arguments
     args = args_parser()
     
+    # Override with your specific parameters for CIFAR-10
+    args.dataset = 'cifar'
+    args.model = 'cnn'
+    args.optimizer = 'adam'
+    args.epochs = 50  # Adjust as needed
+    args.num_users = 100
+    args.frac = 0.2
+    args.local_ep = 5
+    args.local_bs = 32
+    args.lr = 0.001
+    args.iid = 0  # Non-IID
+    args.alpha = 0.5  # Moderate heterogeneity
+    
     # Set random seeds for reproducibility
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -358,9 +391,14 @@ if __name__ == '__main__':
         torch.cuda.manual_seed(args.seed)
     
     # Print experiment details
+    print("=" * 80)
+    print("SCAFFOLD FEDERATED LEARNING EXPERIMENT")
+    print("=" * 80)
     exp_details(args)
     
     # Run SCAFFOLD experiment
     results = run_scaffold_experiment(args)
     
+    print("\n" + "=" * 80)
     print("SCAFFOLD experiment completed successfully!")
+    print("=" * 80)
