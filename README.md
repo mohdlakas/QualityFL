@@ -15,8 +15,8 @@ Advanced federated learning system with intelligent client selection, memory-bas
 ## 🛠️ Installation
 
 ```bash
-git clone https://github.com/mohdlakas/PUMB-Federated-Learning.git
-cd PUMB-Federated-Learning
+git clone https://github.com/mohdlakas/QualityFL.git
+cd QualityFL
 pip install -r requirements.txt
 pip install faiss-cpu  # or faiss-gpu for GPU support
 ```
