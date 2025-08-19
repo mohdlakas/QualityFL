@@ -178,14 +178,13 @@ if __name__ == '__main__':
             # Get loss before training
             loss_before = local_model.inference(model=global_model)[1]
             
-            # NEW: Use efficient update method
+            # EFFICIENT: Single model copy for training
+            model_copy = copy.deepcopy(global_model)
             update_result = local_model.update_weights_efficient(
-                model=copy.deepcopy(global_model), global_round=epoch)
+                model=model_copy, global_round=epoch)
 
-            # Get loss after training
-            temp_model = copy.deepcopy(global_model)
-            temp_model.load_state_dict(update_result['model_state'])
-            loss_after = local_model.inference(model=temp_model)[1]
+            # EFFICIENT: Use the already trained model for loss_after (no extra copy!)
+            loss_after = local_model.inference(model=model_copy)[1]
 
             # Store results efficiently
             client_models[idx] = update_result['model_state']
@@ -226,8 +225,12 @@ if __name__ == '__main__':
         for idx in selected_clients:
             loss_before, loss_after = client_losses[idx]
             
-            # NEW: Calculate parameter update for quality calculation
-            initial_state = server._get_model_state_copy()  # Previous global state
+            # Calculate parameter update for quality calculation
+            if epoch > 0 and server.prev_model_state is not None:
+                initial_state = server.prev_model_state
+            else:
+                initial_state = server._get_model_state_copy()
+                
             param_update = {name: client_models[idx][name] - initial_state[name]
                            for name in client_models[idx]}
             

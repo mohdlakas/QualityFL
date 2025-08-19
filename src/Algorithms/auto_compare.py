@@ -209,7 +209,7 @@ def create_comparison_plots(all_results, timestamp):
     # Save plots
     save_dir = os.path.join('..', '..', 'save', 'images')
     os.makedirs(save_dir, exist_ok=True)
-    plot_path = os.path.join(save_dir, f'comprehensive_comparison_{timestamp}.png')
+    plot_path = os.path.join(save_dir, f'plot_comparison_{timestamp}.png')
     plt.savefig(plot_path, dpi=300, bbox_inches='tight')
     plt.close()
     
@@ -292,8 +292,8 @@ def main():
     # Define experiments
     experiments = [
         ('../federated_main.py', 'FedAvg', base_args),
-        ('FedProx.py', 'FedProx', {**base_args, 'mu': 0.01}),
-        ('Power_of_Choice.py', 'Power-of-Choice', {**base_args, 'd': 10}),
+#        ('FedProx.py', 'FedProx', {**base_args, 'mu': 0.01}),
+#        ('Power_of_Choice.py', 'Power-of-Choice', {**base_args, 'd': 10}),
         ('../federated_pumb_main.py', 'PUMB', {**base_args, 'pumb_exploration_ratio': 0.5, 'pumb_initial_rounds': 10})
     ]
     
