@@ -18,6 +18,8 @@ class DatasetSplit(Dataset):
     def __getitem__(self, item):
         image, label = self.dataset[self.idxs[item]]
         return image, label  # Already handled by Dataset
+    
+
 class LocalUpdate(object):
     def __init__(self, args, dataset, idxs, logger, embedding_gen=None):
         self.args = args
@@ -94,6 +96,44 @@ class LocalUpdate(object):
             'data_size': len(self.trainloader.dataset),
             'avg_loss': final_loss
         }
+
+    def update_weights(self, model, global_round):
+        # Set device from model
+        if self.device is None:
+            self.device = next(model.parameters()).device
+            self.criterion = self.criterion.to(self.device)
+        model.train()
+        epoch_loss = []
+
+        if self.args.optimizer == 'sgd':
+            optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,
+                                        momentum=self.args.momentum)
+        elif self.args.optimizer == 'adam':
+            optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
+                                         weight_decay=1e-4)
+
+        for iter in range(self.args.local_ep):
+            batch_loss = []
+            for batch_idx, (images, labels) in enumerate(self.trainloader):
+                images, labels = images.to(self.device), labels.to(self.device)
+
+                model.zero_grad()
+                log_probs = model(images)
+                loss = self.criterion(log_probs, labels)
+                loss.backward()
+                optimizer.step()
+
+                if self.args.verbose and (batch_idx % 10 == 0):
+                    print('| Global Round : {} | Local Epoch : {} | [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                        global_round, iter, batch_idx * len(images),
+                        len(self.trainloader.dataset),
+                        100. * batch_idx / len(self.trainloader), loss.item()))
+                if self.logger is not None:
+                    self.logger.add_scalar('loss', loss.item())
+                batch_loss.append(loss.item())
+            epoch_loss.append(sum(batch_loss)/len(batch_loss))
+
+        return model.state_dict(), sum(epoch_loss) / len(epoch_loss)
 
     def train_val_test(self, dataset, idxs):
         idxs_train = idxs[:int(0.8*len(idxs))]

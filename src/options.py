@@ -4,6 +4,7 @@
 
 
 import argparse
+from html import parser
 
 def args_parser():
     parser = argparse.ArgumentParser()
@@ -55,11 +56,12 @@ def args_parser():
                         help='FedProx proximal term coefficient')
 
     # ✅ ADD: SCAFFOLD-specific arguments
-    parser.add_argument('--scaffold_lr', type=float, default=None,
-                        help='SCAFFOLD learning rate (if None, uses --lr)')
-    parser.add_argument('--scaffold_global_lr', type=float, default=1.0,
-                        help='SCAFFOLD global learning rate for server updates')
-
+    parser.add_argument('--scaffold_stepsize', type=float, default=1.0,
+                    help='Server stepsize for SCAFFOLD (default: 1.0)')
+    parser.add_argument('--scaffold_use_yogi', type=int, default=0,
+                    help='Use Yogi optimizer for server updates in SCAFFOLD (default: 0)')
+    
+    
     # ✅ ADD: Power-of-Choice specific arguments
     parser.add_argument('--d', type=int, default=10,
                         help='Power-of-Choice: number of candidates to sample for each client selection')

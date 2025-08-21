@@ -2,403 +2,222 @@
 # -*- coding: utf-8 -*-
 """
 SCAFFOLD Federated Learning Implementation
-Fixed version that integrates with your existing codebase
+Based on "SCAFFOLD: Stochastic Controlled Averaging for Federated Learning" by Karimireddy et al. (2020)
 """
 
-import os
-import copy
-import time
-import numpy as np
-from tqdm import tqdm
 import torch
-import torch.nn.functional as F
-import sys
-
-sys.path.append('../')
-from options import args_parser
-from update import LocalUpdate, test_inference
-from models import CNNCifar
-from utils_dir import get_dataset, exp_details, check_gpu_pytorch, ComprehensiveAnalyzer, write_comprehensive_analysis
+import copy
+import numpy as np
+from collections import OrderedDict
 
 
-class SCAFFOLDLocalUpdate(LocalUpdate):
+class SCAFFOLDLocalUpdate:
     """
-    SCAFFOLD local update class that extends your existing LocalUpdate
+    SCAFFOLD local update class that extends the existing LocalUpdate functionality
     """
     def __init__(self, args, dataset, idxs, logger):
-        super().__init__(args, dataset, idxs, logger)
+        self.args = args
+        self.logger = logger
+        self.trainloader, self.validloader, self.testloader = self.train_val_test(
+            dataset, list(idxs))
+        self.device = torch.device('cuda' if torch.cuda.is_available() and args.gpu else 'cpu')
+        self.criterion = torch.nn.NLLLoss().to(self.device)
         
-    def update_weights_scaffold(self, model, global_round, c_global, c_local):
+    def train_val_test(self, dataset, idxs):
         """
-        FIXED SCAFFOLD local update with proper control variates implementation
+        Split indexes for train, validation, and test (80, 10, 10)
         """
-        # Set device from model if not already set
-        if self.device is None:
-            self.device = next(model.parameters()).device
-            self.criterion = self.criterion.to(self.device)
+        from torch.utils.data import DataLoader
+        from update import DatasetSplit
         
-        # Set model to train mode
+        idxs_train = idxs[:int(0.8*len(idxs))]
+        idxs_val = idxs[int(0.8*len(idxs)):int(0.9*len(idxs))]
+        idxs_test = idxs[int(0.9*len(idxs)):]
+        
+        trainloader = DataLoader(DatasetSplit(dataset, idxs_train),
+                                batch_size=self.args.local_bs, shuffle=True)
+        validloader = DataLoader(DatasetSplit(dataset, idxs_val),
+                                batch_size=max(1, min(len(idxs_val), self.args.local_bs)), 
+                                shuffle=False)
+        testloader = DataLoader(DatasetSplit(dataset, idxs_test),
+                               batch_size=max(1, min(len(idxs_test), self.args.local_bs)), 
+                               shuffle=False)
+        return trainloader, validloader, testloader
+
+    def update_weights_scaffold(self, model, c_global, c_local, global_round):
+        """
+        SCAFFOLD local update with control variates (STABLE VERSION)
+        """
         model.train()
         
-        # Store initial model weights for delta calculation
-        w_old = {}
-        for name, param in model.named_parameters():
-            w_old[name] = param.data.clone().detach()
+        # Store initial model state
+        initial_model_state = {name: param.clone().detach() for name, param in model.named_parameters()}
         
-        # Initialize optimizer
+        # Use LOWER learning rate for stability
+        lr = 0.001  # Fixed lower learning rate
+        
         if self.args.optimizer == 'sgd':
-            optimizer = torch.optim.SGD(model.parameters(), lr=self.args.lr,
-                                      momentum=self.args.momentum)
+            optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.5)
         elif self.args.optimizer == 'adam':
-            optimizer = torch.optim.Adam(model.parameters(), lr=self.args.lr,
-                                       weight_decay=1e-4)
+            optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+        else:
+            raise ValueError(f"Unsupported optimizer: {self.args.optimizer}")
         
-        epoch_loss = []
+        epoch_losses = []
         
-        # CRITICAL FIX: Store model states at each step for proper control variate calculation
-        model_states = []
-        
-        # Local training with SCAFFOLD correction
         for iter in range(self.args.local_ep):
-            batch_loss = []
-            
+            batch_losses = []
             for batch_idx, (images, labels) in enumerate(self.trainloader):
                 images, labels = images.to(self.device), labels.to(self.device)
                 
-                # Forward pass
-                model.zero_grad()
+                optimizer.zero_grad()
                 log_probs = model(images)
                 loss = self.criterion(log_probs, labels)
+                
+                # Skip if loss is invalid
+                if not torch.isfinite(loss):
+                    continue
+                    
                 loss.backward()
                 
-                # FIX 1: Apply SCAFFOLD correction BEFORE optimizer step
+                # SCAFFOLD gradient correction
                 with torch.no_grad():
                     for name, param in model.named_parameters():
-                        if param.grad is not None and name in c_global and name in c_local:
-                            # SCAFFOLD formula: g_i = g_i - c_i + c_global
-                            correction = c_global[name] - c_local[name]
-                            param.grad.data = param.grad.data - c_local[name] + c_global[name]
+                        if param.grad is not None:
+                            # Apply SMALL correction to avoid explosion
+                            correction = 0.01 * (c_global[name] - c_local[name])
+                            param.grad.data.add_(correction)
+                    
+                    # AGGRESSIVE gradient clipping
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 
                 optimizer.step()
+                batch_losses.append(loss.item())
+            
+            if batch_losses:
+                epoch_losses.append(sum(batch_losses) / len(batch_losses))
+        
+        # Calculate model updates
+        delta_model = OrderedDict()
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                delta_model[name] = param.data - initial_model_state[name]
+        
+        # SIMPLIFIED control variate update (avoid division by small numbers)
+        delta_control = OrderedDict()
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                # Simple difference - no division
+                delta_control[name] = 0.01 * (c_local[name] - c_global[name] - delta_model[name])
                 
-                # Track loss
-                if not torch.isnan(loss) and not torch.isinf(loss):
-                    batch_loss.append(loss.item())
-                else:
-                    print(f"WARNING: Invalid loss detected: {loss.item()}")
-                    batch_loss.append(2.0)  # Fallback
-                
-            # Calculate epoch loss
-            if batch_loss:
-                epoch_loss.append(sum(batch_loss) / len(batch_loss))
-            else:
-                epoch_loss.append(2.0)  # Fallback
+                # Clip control variates
+                delta_control[name] = torch.clamp(delta_control[name], -1.0, 1.0)
         
-        # Calculate final loss
-        final_loss = sum(epoch_loss) / len(epoch_loss) if epoch_loss else 2.0
-        
-        # Get updated weights
-        w_new = {}
-        for name, param in model.named_parameters():
-            w_new[name] = param.data.clone().detach()
-        
-        # FIX 2: Correct SCAFFOLD control variate update formula
-        # From paper: c_i^{t+1} = c_i^t - c^t + (x^t - y_i^t) / (K * η)
-        c_delta = {}
-        for name in w_old.keys():
-            if name in c_global and name in c_local and name in w_new:
-                # CRITICAL: Correct order and scaling
-                weight_diff = w_old[name] - w_new[name]  # x^t - y_i^t 
-                # New control variate = old_local - global + weight_diff / (K * η)
-                c_new = c_local[name] - c_global[name] + weight_diff / (self.args.local_ep * self.args.lr)
-                c_delta[name] = c_new - c_local[name]  # Delta for aggregation
-            else:
-                print(f"WARNING: Missing parameters for control variate {name}")
-                c_delta[name] = torch.zeros_like(w_new[name]) if name in w_new else torch.zeros_like(w_old[name])
-        
-        return w_new, final_loss, c_delta
+        avg_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else float('inf')
+        return delta_model, delta_control, avg_loss
 
 
 def initialize_control_variates(model):
     """
-    Initialize control variates for SCAFFOLD
-    Start with zeros as per the original SCAFFOLD paper
+    Initialize control variates to zero with the same structure as model parameters
+    
+    Args:
+        model: PyTorch model
+        
+    Returns:
+        control_variates: OrderedDict of zero tensors matching model parameters
     """
-    c = {}
-    for name, param in model.named_parameters():
-        c[name] = torch.zeros_like(param.data)
-    return c
-
-
-def scaffold_aggregate_weights(local_weights):
-    """
-    Aggregate local model weights (standard FedAvg aggregation)
-    """
-    if not local_weights:
-        return {}
-    
-    # Average all local weights
-    global_weights = copy.deepcopy(local_weights[0])
-    
-    for key in global_weights.keys():
-        weight_tensors = [local_weights[i][key] for i in range(len(local_weights))]
-        global_weights[key] = torch.stack(weight_tensors, 0).mean(0)
-    
-    return global_weights
-
-
-def scaffold_aggregate_control_variates(c_deltas, num_users, participation_rate):
-    """
-    FIXED: Proper SCAFFOLD control variate aggregation
-    c^{t+1} = c^t + (1/N) * Σ(Δc_i) where N is TOTAL users, not just participating
-    """
-    if not c_deltas:
-        return {}
-    
-    # Initialize aggregated control variate update
-    c_global_delta = {}
-    
-    # Average all control variate deltas and scale by participation
-    for name in c_deltas[0].keys():
-        delta_tensors = [c_delta[name] for c_delta in c_deltas]
-        # CRITICAL FIX: Scale by participation rate properly
-        c_global_delta[name] = torch.stack(delta_tensors, 0).mean(0) * participation_rate
-    
-    return c_global_delta
-
-
-def run_scaffold_experiment(args):
-    """
-    Main SCAFFOLD federated learning experiment
-    """
-    start_time = time.time()
-    
-    # Set device
-    device = check_gpu_pytorch()
-    
-    # Get dataset
-    print("Loading dataset...")
-    train_dataset, test_dataset, user_groups = get_dataset(args)
-    
-    # Initialize model
-    print("Initializing model...")
-    if args.model == 'cnn':
-        if args.dataset == 'cifar100':
-            args.num_classes = 100
-        elif args.dataset in ['cifar', 'cifar10']:
-            args.num_classes = 10
-        else:
-            raise ValueError(f'Unsupported dataset: {args.dataset}')
-        
-        global_model = CNNCifar(args)
-    else:
-        raise ValueError('Only CNN model is supported')
-    
-    global_model.to(device)
-    global_model.train()
-    
-    # Initialize SCAFFOLD control variates
-    print("Initializing SCAFFOLD control variates...")
-    c_global = initialize_control_variates(global_model)
-    c_local = {i: initialize_control_variates(global_model) for i in range(args.num_users)}
-    
-    # Move control variates to device
-    for name in c_global.keys():
-        c_global[name] = c_global[name].to(device)
-        for i in range(args.num_users):
-            c_local[i][name] = c_local[i][name].to(device)
-    
-    # Initialize tracking
-    train_loss, train_accuracy = [], []
-    analyzer = ComprehensiveAnalyzer()
-    
-    print("Starting SCAFFOLD training...")
-    print(f"Total rounds: {args.epochs}")
-    print(f"Clients per round: {max(int(args.frac * args.num_users), 1)}")
-    
-    # Training loop
-    for epoch in tqdm(range(args.epochs), desc="SCAFFOLD Training"):
-        local_weights, local_losses, c_deltas = [], [], []
-        
-        # Select clients for this round
-        m = max(int(args.frac * args.num_users), 1)
-        idxs_users = np.random.choice(range(args.num_users), m, replace=False)
-        
-        round_start_time = time.time()
-        
-        # Train selected clients
-        for idx in idxs_users:
-            # Create local update instance
-            local_model = SCAFFOLDLocalUpdate(
-                args=args, 
-                dataset=train_dataset,
-                idxs=user_groups[idx], 
-                logger=None
-            )
-            
-            # CRITICAL FIX: Don't deepcopy the global model, use a fresh copy each time
-            client_model = copy.deepcopy(global_model)
-            
-            # Perform local update with SCAFFOLD
-            w, loss, c_delta = local_model.update_weights_scaffold(
-                model=client_model,
-                global_round=epoch,
-                c_global=c_global,
-                c_local=c_local[idx]
-            )
-            
-            # Store results
-            local_weights.append(copy.deepcopy(w))
-            local_losses.append(copy.deepcopy(loss))
-            c_deltas.append(c_delta)
-        
-        # Aggregate model weights (standard FedAvg)
-        global_weights = scaffold_aggregate_weights(local_weights)
-        
-        # Aggregate control variates (SCAFFOLD specific)
-        participation_rate = len(c_deltas) / args.num_users
-        c_global_delta = scaffold_aggregate_control_variates(c_deltas, args.num_users, participation_rate)
-        
-        # FIX: Update global control variate correctly
-        for name in c_global.keys():
-            if name in c_global_delta:
-                c_global[name] = c_global[name] + c_global_delta[name]
-            else:
-                print(f"WARNING: Missing global delta for {name}")
-        
-        # FIX: Update local control variates correctly  
-        for idx, c_delta in zip(idxs_users, c_deltas):
-            for name in c_local[idx].keys():
-                if name in c_delta:
-                    c_local[idx][name] = c_local[idx][name] + c_delta[name]
-                else:
-                    print(f"WARNING: Missing local delta for client {idx}, param {name}")
-        
-        # Update global model
-        global_model.load_state_dict(global_weights)
-        
-        # Calculate metrics
-        loss_avg = sum(local_losses) / len(local_losses)
-        if np.isnan(loss_avg) or np.isinf(loss_avg):
-            print(f"WARNING: Invalid loss_avg at round {epoch+1}, using fallback")
-            loss_avg = 2.0
-        
-        train_loss.append(loss_avg)
-        
-        # Calculate training accuracy on selected clients
-        train_acc = calculate_training_accuracy(global_model, train_dataset, user_groups, 
-                                              idxs_users, device)
-        train_accuracy.append(train_acc)
-        
-        # Track round time
-        round_time = time.time() - round_start_time
-        
-        # Update analyzer
-        analyzer.track_training_accuracy(train_acc)
-        analyzer.track_round_time(round_time)
-        analyzer.track_client_selection(idxs_users)
-        
-        # Print progress
-        if (epoch + 1) % 5 == 0 or epoch == 0:
-            test_acc, _ = test_inference(args, global_model, test_dataset)
-            analyzer.track_test_accuracy(test_acc)
-            print(f"Round {epoch+1:3d}: Train Acc = {train_acc*100:5.2f}%, "
-                  f"Test Acc = {test_acc*100:5.2f}%, Loss = {loss_avg:6.4f}, "
-                  f"Time = {round_time:5.2f}s")
-        else:
-            print(f"Round {epoch+1:3d}: Train Acc = {train_acc*100:5.2f}%, "
-                  f"Loss = {loss_avg:6.4f}, Time = {round_time:5.2f}s")
-    
-    # Final evaluation
-    print("\nFinal evaluation...")
-    test_acc, test_loss = test_inference(args, global_model, test_dataset)
-    total_time = time.time() - start_time
-    
-    print(f"\nSCAFFOLD Training Complete!")
-    print(f"Final Test Accuracy: {test_acc*100:.2f}%")
-    print(f"Final Test Loss: {test_loss:.4f}")
-    print(f"Total Training Time: {total_time:.2f} seconds")
-    
-    # Generate comprehensive analysis
-    report_filename = f"scaffold_analysis_{args.dataset}_{args.alpha if not args.iid else 'iid'}.txt"
-    write_comprehensive_analysis(analyzer, args, test_acc, total_time, report_filename)
-    print(f"Detailed analysis saved to: {report_filename}")
-    
-    return {
-        'train_accuracy': train_accuracy,
-        'train_loss': train_loss,
-        'test_accuracy': test_acc,
-        'test_loss': test_loss,
-        'total_time': total_time,
-        'analyzer': analyzer
-    }
-
-
-def calculate_training_accuracy(model, dataset, user_groups, selected_clients, device):
-    """
-    Calculate training accuracy on selected clients' data
-    """
-    model.eval()
-    correct = 0
-    total = 0
+    control_variates = OrderedDict()
     
     with torch.no_grad():
-        for client_idx in selected_clients:
-            # Get client's data indices
-            client_indices = user_groups[client_idx]
-            if isinstance(client_indices, (set, list)):
-                client_indices = list(client_indices)
-            
-            # Create data loader for this client
-            client_loader = torch.utils.data.DataLoader(
-                torch.utils.data.Subset(dataset, client_indices),
-                batch_size=64, shuffle=False
-            )
-            
-            # Evaluate on this client's data
-            for images, labels in client_loader:
-                images, labels = images.to(device), labels.to(device)
-                outputs = model(images)
-                _, predicted = torch.max(outputs, 1)
-                total += labels.size(0)
-                correct += (predicted == labels).sum().item()
+        for name, param in model.named_parameters():
+            control_variates[name] = torch.zeros_like(param.data)
     
-    model.train()  # Set back to training mode
-    return correct / total if total > 0 else 0.0
+    return control_variates
 
 
-if __name__ == '__main__':
-    # Parse arguments
-    args = args_parser()
+def aggregate_model_updates(delta_models):
+    """
+    Aggregate model updates from multiple clients
     
-    # Override with your specific parameters for CIFAR-10
-    args.dataset = 'cifar'
-    args.model = 'cnn'
-    args.optimizer = 'adam'
-    args.epochs = 50  # Adjust as needed
-    args.num_users = 100
-    args.frac = 0.2
-    args.local_ep = 5
-    args.local_bs = 32
-    args.lr = 0.001
-    args.iid = 0  # Non-IID
-    args.alpha = 0.5  # Moderate heterogeneity
+    Args:
+        delta_models: List of model updates from clients
+        
+    Returns:
+        aggregated_delta: Averaged model updates
+    """
+    aggregated_delta = OrderedDict()
     
-    # Set random seeds for reproducibility
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(args.seed)
+    # Initialize with zeros
+    for name in delta_models[0].keys():
+        aggregated_delta[name] = torch.zeros_like(delta_models[0][name])
     
-    # Print experiment details
-    print("=" * 80)
-    print("SCAFFOLD FEDERATED LEARNING EXPERIMENT")
-    print("=" * 80)
-    exp_details(args)
+    # Sum all updates
+    for delta in delta_models:
+        for name, param_delta in delta.items():
+            aggregated_delta[name].add_(param_delta)
     
-    # Run SCAFFOLD experiment
-    results = run_scaffold_experiment(args)
+    # Average
+    num_clients = len(delta_models)
+    for name in aggregated_delta.keys():
+        aggregated_delta[name].div_(num_clients)
     
-    print("\n" + "=" * 80)
-    print("SCAFFOLD experiment completed successfully!")
-    print("=" * 80)
+    return aggregated_delta
+
+
+def aggregate_control_updates(delta_controls, num_total_clients):
+    """
+    Aggregate control variate updates from participating clients
+    
+    Args:
+        delta_controls: List of control variate updates from participating clients
+        num_total_clients: Total number of clients (N)
+        
+    Returns:
+        aggregated_delta_c: Aggregated control variate updates
+    """
+    aggregated_delta_c = OrderedDict()
+    
+    # Initialize with zeros
+    for name in delta_controls[0].keys():
+        aggregated_delta_c[name] = torch.zeros_like(delta_controls[0][name])
+    
+    # Sum all control updates
+    for delta_c in delta_controls:
+        for name, control_delta in delta_c.items():
+            aggregated_delta_c[name].add_(control_delta)
+    
+    # Scale by |S|/N where |S| is number of participating clients
+    num_participating = len(delta_controls)
+    scaling_factor = num_participating / num_total_clients
+    
+    for name in aggregated_delta_c.keys():
+        aggregated_delta_c[name].mul_(scaling_factor)
+    
+    return aggregated_delta_c
+
+
+def update_global_model(model, aggregated_delta):
+    """
+    Update global model with aggregated updates
+    
+    Args:
+        model: Global model
+        aggregated_delta: Aggregated model updates
+    """
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            param.data.add_(aggregated_delta[name])
+
+
+def update_control_variates(control_variates, aggregated_delta_c):
+    """
+    Update control variates with aggregated updates
+    
+    Args:
+        control_variates: Current control variates
+        aggregated_delta_c: Aggregated control variate updates
+    """
+    with torch.no_grad():
+        for name in control_variates.keys():
+            control_variates[name].add_(aggregated_delta_c[name])
