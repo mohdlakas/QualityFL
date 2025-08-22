@@ -190,7 +190,10 @@ class LocalUpdate(object):
         }
         
         return stats
+<<<<<<< HEAD
     
+=======
+>>>>>>> 88b4fac2f278e9840ffbe0d01d816fe31ca88aff
 
 class CIFAR100LocalUpdate(LocalUpdate):
     """CIFAR-100 optimized LocalUpdate with memory management"""
