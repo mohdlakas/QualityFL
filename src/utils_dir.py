@@ -40,61 +40,89 @@ def get_dataset(args):
     Now uses modern Dirichlet distribution for non-IID data instead of legacy shard methods.
     """
 
-    if args.dataset == 'cifar' or args.dataset == 'cifar100':
-        if args.dataset == 'cifar':
+    if args.dataset == 'cifar' or args.dataset == 'cifar10' or args.dataset == 'cifar100':
+        # Determine which CIFAR dataset to use
+        if args.dataset == 'cifar' or args.dataset == 'cifar10':
             dataset_class = datasets.CIFAR10
-            data_dir = './data/cifar/'  # Updated path (removed '../')
-            args.num_classes = 10  # Auto-update for CIFAR-10
-        else:
+            data_dir = './data/cifar/'
+            args.num_classes = 10
+            dataset_name = 'CIFAR-10'
+        else:  # cifar100
             dataset_class = datasets.CIFAR100
-            data_dir = './data/cifar100/'  # Updated path (removed '../')
-            args.num_classes = 100  # Auto-update for CIFAR-100
+            data_dir = './data/cifar100/'
+            args.num_classes = 100
+            dataset_name = 'CIFAR-100'
 
         args.num_channels = 3  # Auto-update for CIFAR datasets
 
-        apply_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-        ])
+        # Different transforms for CIFAR-10 vs CIFAR-100
+        if args.dataset == 'cifar100':
+            # CIFAR-100 optimized transforms
+            train_transform = transforms.Compose([
+                transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762))
+            ])
+            
+            test_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762))
+            ])
+        else:
+            # CIFAR-10 transforms
+            train_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+            ])
+            test_transform = train_transform
 
         train_dataset = dataset_class(data_dir, train=True, download=True,
-                                     transform=apply_transform)
+                                     transform=train_transform)
         test_dataset = dataset_class(data_dir, train=False, download=True,
-                                    transform=apply_transform)
+                                    transform=test_transform)
 
-        # Sample training data amongst users using modern Dirichlet approach
+        # Sample training data amongst users
         if args.iid:
-            print(f"Creating IID data distribution for {args.dataset.upper()}...")
-            if args.dataset == 'cifar':
+            print(f"Creating IID data distribution for {dataset_name}...")
+            if args.dataset == 'cifar' or args.dataset == 'cifar10':
                 user_groups = cifar10_iid(train_dataset, args.num_users)
             else:
                 user_groups = cifar100_iid(train_dataset, args.num_users)
         else:
-            # Modern Dirichlet-based Non-IID distribution
-            alpha = getattr(args, 'alpha', 0.5)  # Default alpha if not specified
-            min_samples = getattr(args, 'min_samples', 50) # Default min samples
+            # Non-IID distribution
+            alpha = getattr(args, 'alpha', 0.5)
+            min_samples = getattr(args, 'min_samples', 50)
 
-            print(f"Creating Non-IID data distribution for {args.dataset.upper()} with alpha={alpha}...")
+            print(f"Creating Non-IID data distribution for {dataset_name} with alpha={alpha}...")
             
-            if args.dataset == 'cifar':
+            if args.dataset == 'cifar' or args.dataset == 'cifar10':
                 user_groups = cifar10_dirichlet(train_dataset, args.num_users, 
                                               alpha=alpha, min_samples_per_user=min_samples)
             else:
-                user_groups = cifar100_dirichlet(train_dataset, args.num_users, 
-                                               alpha=alpha, min_samples_per_user=min_samples)
-            
+                # Check if enhanced CIFAR-100 function exists, otherwise use standard
+                try:
+                    from sampling_dir import cifar100_enhanced_noniid
+                    user_groups = cifar100_enhanced_noniid(train_dataset, args.num_users, 
+                                                         alpha=alpha, classes_per_user=10)
+                    print("Using enhanced CIFAR-100 non-IID distribution")
+                except ImportError:
+                    # Fallback to standard Dirichlet
+                    user_groups = cifar100_dirichlet(train_dataset, args.num_users, 
+                                                   alpha=alpha, min_samples_per_user=min_samples)
+                    print("Using standard Dirichlet distribution for CIFAR-100")
 
-
-    elif args.dataset == 'mnist' or args.dataset == 'fmnist':  # Fixed comparison
+    elif args.dataset == 'mnist' or args.dataset == 'fmnist':
         if args.dataset == 'mnist':
-            data_dir = './data/mnist/'  # Updated path (removed '../')
+            data_dir = './data/mnist/'
             dataset_class = datasets.MNIST
         else:
-            data_dir = './data/fmnist/'  # Updated path (removed '../')
+            data_dir = './data/fmnist/'
             dataset_class = datasets.FashionMNIST
 
-        args.num_classes = 10  # Auto-update for MNIST/FashionMNIST
-        args.num_channels = 1  # Auto-update for grayscale datasets
+        args.num_classes = 10
+        args.num_channels = 1
 
         apply_transform = transforms.Compose([
             transforms.ToTensor(),
@@ -106,23 +134,20 @@ def get_dataset(args):
         test_dataset = dataset_class(data_dir, train=False, download=True,
                                     transform=apply_transform)
 
-        # Sample training data amongst users using modern Dirichlet approach
+        # Sample training data amongst users
         if args.iid:
             print(f"Creating IID data distribution for {args.dataset.upper()}...")
             user_groups = mnist_iid(train_dataset, args.num_users)
         else:
-            # Modern Dirichlet-based Non-IID distribution
-            alpha = getattr(args, 'alpha', 0.5)  # Default alpha if not specified
-            min_samples = getattr(args, 'min_samples', 50)  # Default min samples
+            alpha = getattr(args, 'alpha', 0.5)
+            min_samples = getattr(args, 'min_samples', 50)
             
             print(f"Creating Non-IID data distribution for {args.dataset.upper()} with alpha={alpha}...")
             user_groups = mnist_dirichlet(train_dataset, args.num_users, 
                                         alpha=alpha, min_samples_per_user=min_samples)
-            
-
 
     else:
-        raise ValueError(f"Dataset '{args.dataset}' not supported. Choose from: 'mnist', 'fmnist', 'cifar', 'cifar100'")
+        raise ValueError(f"Dataset '{args.dataset}' not supported. Choose from: 'mnist', 'fmnist', 'cifar', 'cifar10', 'cifar100'")
 
     # Optional: Analyze data distribution if requested
     if hasattr(args, 'analyze_data') and args.analyze_data:
@@ -935,3 +960,121 @@ def aggregate_multiple_runs(reports_list, output_filename):
         f.write("TRAINING STABILITY:\n")
         f.write(f"Mean ± Std: {stab_mean:.6f} ± {stab_std:.6f}\n")
         f.write(f"Individual runs: {[f'{stab:.6f}' for stab in training_stabilities]}\n\n")
+
+def write_scaffold_comprehensive_analysis(analyzer, args, final_test_acc, total_time, filename, experiment_seed=None):
+    """
+    Generate comprehensive analysis report for SCAFFOLD federated learning
+    """
+    with open(filename, 'w') as f:
+        f.write("="*80 + "\n")
+        f.write("SCAFFOLD FEDERATED LEARNING - COMPREHENSIVE ANALYSIS REPORT\n")
+        f.write("="*80 + "\n")
+        f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Experiment Seed: {experiment_seed}\n\n")
+        
+        # Experiment Configuration
+        f.write("EXPERIMENT CONFIGURATION\n")
+        f.write("-" * 40 + "\n")
+        f.write(f"Algorithm: SCAFFOLD (Stochastic Controlled Averaging)\n")
+        f.write(f"Dataset: {args.dataset.upper()}\n")
+        f.write(f"Model: {args.model.upper()}\n")
+        f.write(f"Global Rounds: {args.epochs}\n")
+        f.write(f"Total Clients: {args.num_users}\n")
+        f.write(f"Client Participation Rate: {args.frac} ({int(args.frac * args.num_users)} clients/round)\n")
+        f.write(f"Local Epochs: {args.local_ep}\n")
+        f.write(f"Local Batch Size: {args.local_bs}\n")
+        f.write(f"Learning Rate: {getattr(args, 'lr', 'N/A')}\n")
+        f.write(f"Optimizer: {getattr(args, 'optimizer', 'N/A')}\n")
+        f.write(f"Data Distribution: {'IID' if args.iid else 'Non-IID'}\n")
+        if not args.iid:
+            f.write(f"Dirichlet Alpha: {getattr(args, 'alpha', 'N/A')}\n")
+        f.write(f"SCAFFOLD Step Size: {getattr(args, 'scaffold_stepsize', 1.0)}\n")
+        f.write("\n")
+        
+        # Performance Metrics
+        f.write("PERFORMANCE METRICS\n")
+        f.write("-" * 40 + "\n")
+        f.write(f"Final Test Accuracy: {final_test_acc:.4f} ({final_test_acc*100:.2f}%)\n")
+        f.write(f"Total Training Time: {total_time:.2f} seconds\n")
+        f.write(f"Average Time per Round: {total_time/args.epochs:.2f} seconds\n")
+        f.write("\n")
+        
+        # Convergence Analysis
+        convergence_metrics = analyzer.calculate_convergence_metrics()
+        f.write("CONVERGENCE ANALYSIS\n")
+        f.write("-" * 40 + "\n")
+        f.write(f"Convergence Round: {convergence_metrics.get('convergence_round', 'N/A')}\n")
+        f.write(f"Training Stability: {convergence_metrics.get('training_stability', 0):.6f}\n")
+        f.write(f"Final Training Accuracy: {convergence_metrics.get('final_train_acc', 0)*100:.2f}%\n")
+        f.write(f"Training Loss Reduction: {convergence_metrics.get('loss_reduction', 0):.4f}\n")
+        f.write("\n")
+        
+        # Client Selection Analysis
+        client_analysis = analyzer.analyze_client_selection_quality()
+        f.write("CLIENT SELECTION ANALYSIS\n")
+        f.write("-" * 40 + "\n")
+        f.write(f"Total Unique Clients Selected: {client_analysis.get('total_unique_clients', 0)}\n")
+        f.write(f"Average Participation Rate: {client_analysis.get('avg_participation_rate', 0):.4f}\n")
+        f.write(f"Client Selection Diversity: {client_analysis.get('selection_diversity', 0):.4f}\n")
+        f.write("Note: SCAFFOLD uses random client selection with control variates for gradient correction\n")
+        f.write("\n")
+        
+        # Control Variate Analysis (SCAFFOLD-specific)
+        f.write("SCAFFOLD-SPECIFIC ANALYSIS\n")
+        f.write("-" * 40 + "\n")
+        f.write("Control Variate Behavior:\n")
+        f.write("- SCAFFOLD uses control variates to reduce client drift in non-IID settings\n")
+        f.write("- Global control variates are updated based on aggregated local corrections\n")
+        f.write("- Local control variates help clients correct for distribution heterogeneity\n")
+        f.write(f"- Random client selection ensures unbiased gradient estimation\n")
+        f.write("\n")
+        
+        # Algorithm Strengths and Limitations
+        f.write("ALGORITHM CHARACTERISTICS\n")
+        f.write("-" * 40 + "\n")
+        f.write("SCAFFOLD Strengths:\n")
+        f.write("+ Reduces client drift through control variates\n")
+        f.write("+ Theoretically proven convergence guarantees\n")
+        f.write("+ Works with arbitrary local update steps\n")
+        f.write("+ Handles non-IID data distributions\n")
+        f.write("\n")
+        f.write("SCAFFOLD Limitations:\n")
+        f.write("- Requires additional memory for control variates\n")
+        f.write("- Sensitive to learning rate and hyperparameter tuning\n")
+        f.write("- Can be unstable with aggressive learning rates\n")
+        f.write("- Random client selection may miss important clients\n")
+        f.write("\n")
+        
+        # Round-by-Round Summary (last 10 rounds)
+        f.write("FINAL ROUNDS SUMMARY (Last 10 Rounds)\n")
+        f.write("-" * 40 + "\n")
+        if hasattr(analyzer, 'round_data') and len(analyzer.round_data) >= 10:
+            for i in range(max(0, len(analyzer.round_data)-10), len(analyzer.round_data)):
+                round_data = analyzer.round_data[i]
+                f.write(f"Round {round_data['round_num']:3d}: ")
+                f.write(f"Train Acc={round_data.get('train_acc', 0)*100:5.2f}% ")
+                if round_data.get('test_acc') is not None:
+                    f.write(f"Test Acc={round_data['test_acc']*100:5.2f}% ")
+                f.write(f"Loss={round_data.get('train_loss', 0):6.4f} ")
+                f.write(f"Time={round_data.get('round_time', 0):4.1f}s")
+                f.write(f" Clients={len(round_data.get('selected_clients', []))}\n")
+        f.write("\n")
+        
+        # Research Insights
+        f.write("RESEARCH INSIGHTS FOR COMPARISON\n")
+        f.write("-" * 40 + "\n")
+        f.write("SCAFFOLD Performance Characteristics:\n")
+        f.write(f"- Achieved {final_test_acc*100:.2f}% accuracy with control variate correction\n")
+        f.write(f"- Uses gradient correction to handle client heterogeneity\n")
+        f.write(f"- Random client selection provides unbiased but potentially suboptimal coverage\n")
+        f.write(f"- Performance depends heavily on hyperparameter tuning and stability\n")
+        f.write("\n")
+        f.write("For comparison with intelligent client selection methods (e.g., PUMB):\n")
+        f.write("- SCAFFOLD focuses on gradient correction rather than client quality\n")
+        f.write("- May benefit from combining with intelligent client selection\n")
+        f.write("- Control variate overhead vs. client selection efficiency trade-off\n")
+        f.write("\n")
+        
+        f.write("="*80 + "\n")
+        f.write("END OF SCAFFOLD COMPREHENSIVE ANALYSIS\n")
+        f.write("="*80 + "\n")

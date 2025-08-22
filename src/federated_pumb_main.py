@@ -12,7 +12,7 @@ matplotlib.use('Agg')
 
 from options import args_parser
 from update import LocalUpdate, test_inference
-from models import CNNCifar
+from models import CNNCifar, CNNCifar100
 
 from federated_PUMB import PUMBFederatedServer
 from utils_dir import (get_dataset, exp_details, plot_data_distribution,
@@ -31,13 +31,42 @@ os.makedirs(f'{save_base}/objects', exist_ok=True)
 os.makedirs(f'{save_base}/images', exist_ok=True)
 os.makedirs(f'{save_base}/logs', exist_ok=True)
 
+def initialize_cifar100_settings(args):
+    """Initialize settings specifically for CIFAR-100"""
+    if args.dataset == 'cifar100':
+        # Force CIFAR-100 settings
+        args.num_classes = 100
+        args.num_channels = 3
+        
+        # Optimize hyperparameters for CIFAR-100
+        if args.local_bs > 32:
+            args.local_bs = min(32, args.local_bs)
+            print(f"Reduced batch size to {args.local_bs} for CIFAR-100")
+        
+        if args.lr > 0.001:
+            args.lr = 0.001
+            print(f"Reduced learning rate to {args.lr} for CIFAR-100")
+        
+        # Use Adam optimizer for better convergence
+        args.optimizer = 'adam'
+        
+        print(f"CIFAR-100 Configuration:")
+        print(f"  - Classes: {args.num_classes}")
+        print(f"  - Batch size: {args.local_bs}")
+        print(f"  - Learning rate: {args.lr}")
+        print(f"  - Optimizer: {args.optimizer}")
+        
+    return args
+
+
     
 if __name__ == '__main__':
     start_time = time.time()
     args = args_parser()
-
+    args = initialize_cifar100_settings(args)
 
     device = check_gpu_pytorch()
+
     # Load dataset and user groups
     train_dataset, test_dataset, user_groups = get_dataset(args)
 
@@ -48,38 +77,28 @@ if __name__ == '__main__':
         title="Client Data Distribution (IID={})".format(args.iid)
     )
     
-    # Build model
+     # Build model
     if args.model == 'cnn':
         # Force correct number of classes before model creation
         if args.dataset == 'cifar100':
             args.num_classes = 100
             print(f"FORCED: Setting num_classes to {args.num_classes} for CIFAR-100")
+            # Create CIFAR-100 specific model
+            global_model = CNNCifar100(args)
+            print(f"Model created with {global_model.fc3.out_features} output classes (CIFAR-100 architecture)")
         elif args.dataset == 'cifar' or args.dataset == 'cifar10':
             args.num_classes = 10
             print(f"FORCED: Setting num_classes to {args.num_classes} for CIFAR-10")
+            global_model = CNNCifar(args)
+            print(f"Model created with {global_model.fc2.out_features} output classes")
         else:
-            exit(f'Error: unsupported dataset {args.dataset}. Only cifar10 and cifar100 are supported.')
+            exit(f'Error: unsupported dataset {args.dataset}')
             
         # Create model with correct output dimensions
-        global_model = CNNCifar(args)
-        print(f"Model created with {global_model.fc2.out_features} output classes")
+        #global_model = CNNCifar(args)
+        #print(f"Model created with {global_model.fc3.out_features if global_model.use_three_fc else global_model.fc2.out_features} output classes")
         
         global_model.to(device)
-        
-        # ✅ ADD THIS DEBUG:
-    #     print(f"=== DIMENSION DEBUG ===")
-    #     dummy = torch.randn(2, 3, 32, 32).to(device)
-    #     try:
-    #         with torch.no_grad():
-    #             output = global_model(dummy)
-    #             print(f"✅ SUCCESS: Output shape = {output.shape}")
-    #             print(f"Expected: [2, {args.num_classes}]")
-    #     except Exception as e:
-    #         print(f"❌ MODEL ERROR: {e}")
-    #         exit("Fix model dimensions before continuing")
-    # else:
-    #     exit('Error: only CNN model is supported. Use --model=cnn')
-
     
     global_model.train()
 
@@ -94,6 +113,16 @@ if __name__ == '__main__':
     loss_fn = torch.nn.NLLLoss()
     # Initialize PUMB server
     server = PUMBFederatedServer(global_model, optimizer, loss_fn, args, embedding_dim=512)
+
+    # Use CIFAR-100 specific quality metric if applicable
+    if args.dataset == 'cifar100':
+        from quality_metric2 import CIFAR100QualityMetric
+        server.quality_calc = CIFAR100QualityMetric(alpha=0.3, beta=0.2, gamma=0.5)
+        print("Using CIFAR-100 optimized quality metric")
+    else:
+        # For other datasets, the server already has a default quality metric
+        # (StableQualityMetric) set in PUMBFederatedServer.__init__
+        print(f"Using default quality metric for {args.dataset}")
 
     # NEW: Store quality metric info in args for dynamic exp_details
     quality_metric = server.quality_calc
@@ -140,6 +169,7 @@ if __name__ == '__main__':
         client_losses = {}
         data_sizes = {}
         #param_updates = {}
+        training_losses = {}
         client_embeddings = {}  # NEW: Store pre-computed embeddings
         all_loss_improvements = []
 
@@ -190,6 +220,8 @@ if __name__ == '__main__':
             client_models[idx] = update_result['model_state']
             client_losses[idx] = (loss_before, loss_after)
             data_sizes[idx] = update_result['data_size']
+            
+            training_losses[idx] = update_result['avg_loss']  # This is the training loss from update_weights_efficient
             
             # NEW: Store pre-computed embedding or stats
             if update_result['embedding'] is not None:
@@ -353,7 +385,9 @@ if __name__ == '__main__':
         server.prev_model_state = updated_state
 
         # Evaluation and logging
-        loss_avg = np.mean([loss_after for _, loss_after in client_losses.values()])
+        #loss_avg = np.mean([loss_after for _, loss_after in client_losses.values()])
+        loss_avg = np.mean(list(training_losses.values()))  # Use training loss for fair comparison
+
         train_loss.append(loss_avg)
 
         # ADD THIS: Print test accuracy every round for auto_compare parsing

@@ -20,8 +20,8 @@ class PUMBFederatedServer:
         self.memory_bank = MemoryBank(embedding_dim=embedding_dim)
         self.client_selector = IntelligentSelector(
             self.memory_bank,
-            initial_rounds=getattr(args, 'pumb_initial_rounds', 3),
-            exploration_ratio=getattr(args, 'pumb_exploration_ratio', 0.7)
+            initial_rounds=getattr(args, 'pumb_initial_rounds', 15),
+            exploration_ratio=getattr(args, 'pumb_exploration_ratio', 0.3)
         )
 
         #self.quality_calc = GenerousQualityMetric()

@@ -278,9 +278,10 @@ def main():
     base_args = {
         'dataset': 'cifar',
         'model': 'cnn',
-        'epochs': 100,  # Reduced for faster testing
+        'epochs': 100,
         'num_users': 100,
-        'frac': 0.1,
+        'frac': 0.2,
+        'optimizer': 'adam',
         'local_ep': 5,
         'local_bs': 32,
         'lr': 0.0005,
@@ -292,7 +293,7 @@ def main():
     # Define experiments
     experiments = [
         ('../federated_main.py', 'FedAvg', base_args),
-#        ('FedProx.py', 'FedProx', {**base_args, 'mu': 0.01}),
+        ('FedProx.py', 'FedProx', {**base_args, 'mu': 0.01}),
 #        ('Power_of_Choice.py', 'Power-of-Choice', {**base_args, 'd': 10}),
         ('../federated_pumb_main.py', 'PUMB', {**base_args, 'pumb_exploration_ratio': 0.5, 'pumb_initial_rounds': 10})
     ]

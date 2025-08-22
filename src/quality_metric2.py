@@ -180,7 +180,93 @@ class QualityMetric:
             # Assume it's already an array
             return model_params.flatten()
 
-
+class CIFAR100QualityMetric(QualityMetric):
+    """
+    CIFAR-100 optimized quality metric with longer exploration phase
+    """
+    
+    def __init__(self, alpha=0.3, beta=0.2, gamma=0.5):
+        super().__init__(alpha, beta, gamma)
+        self.cifar100_exploration_rounds = 15
+        self.baseline_quality = 0.4
+        self.round_qualities = []
+        
+        # Setup logging
+        from datetime import datetime
+        import os
+        
+        log_dir = '../save/logs'
+        os.makedirs(log_dir, exist_ok=True)
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_file = f'{log_dir}/cifar100_quality_{timestamp}.log'
+        
+        has_file_handler = any(isinstance(h, logging.FileHandler) for h in self.logger.handlers)
+        
+        if not has_file_handler:
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            self.logger.addHandler(file_handler)
+            self.logger.setLevel(logging.INFO)
+            
+            self.logger.info("=== CIFAR-100 QUALITY METRIC INITIALIZED ===")
+            self.logger.info(f"Weights: alpha={alpha}, beta={beta}, gamma={gamma}")
+            self.logger.info(f"Exploration rounds: {self.cifar100_exploration_rounds}")
+            
+        print(f"📝 CIFAR100QualityMetric logging to: {log_file}")
+        
+    def calculate_quality(self, loss_before, loss_after, data_sizes, param_update, 
+                         round_num, client_id, all_loss_improvements=None):
+        
+        # Extended exploration phase for CIFAR-100
+        if round_num < self.cifar100_exploration_rounds:
+            exploration_quality = 0.35 + 0.3 * np.random.random()
+            self.round_qualities.append(exploration_quality)
+            return exploration_quality
+            
+        # Regular quality calculation with CIFAR-100 adjustments
+        base_quality = super().calculate_quality(
+            loss_before, loss_after, data_sizes, param_update,
+            round_num, client_id, all_loss_improvements
+        )
+        
+        # CIFAR-100 specific adjustments
+        loss_improvement = max(0, loss_before - loss_after)
+        if loss_improvement > 0.05:
+            improvement_bonus = 0.15
+        elif loss_improvement > 0.01:
+            improvement_bonus = 0.05
+        else:
+            improvement_bonus = 0.0
+            
+        # Data size bonus
+        if data_sizes and client_id in data_sizes:
+            all_sizes = list(data_sizes.values())
+            if len(all_sizes) > 1:
+                client_size = data_sizes[client_id]
+                size_percentile = (sorted(all_sizes).index(client_size) + 1) / len(all_sizes)
+                if size_percentile > 0.7:
+                    data_bonus = 0.1
+                else:
+                    data_bonus = 0.0
+            else:
+                data_bonus = 0.0
+        else:
+            data_bonus = 0.0
+        
+        adjusted_quality = max(self.baseline_quality, 
+                              base_quality + improvement_bonus + data_bonus)
+        
+        self.round_qualities.append(adjusted_quality)
+        
+        if round_num % 10 == 0 and len(self.round_qualities) > 20:
+            recent_q = self.round_qualities[-20:]
+            self.logger.info(f"Round {round_num}: Recent quality mean={np.mean(recent_q):.4f}, "
+                           f"std={np.std(recent_q):.4f}")
+        
+        return min(1.0, adjusted_quality)
+    
+    
 # ALTERNATIVE: Even more generous quality metric for better exploration
 class GenerousQualityMetric(QualityMetric):
     """
@@ -300,7 +386,7 @@ class StableQualityMetric(QualityMetric):
     4. Robust normalization to prevent extreme scores
     """
     
-    def __init__(self, alpha=0.3, beta=0.2, gamma=0.5):  # More balanced weights
+    def __init__(self, alpha=0.4, beta=0.1, gamma=0.5):  # More balanced weights
         super().__init__(alpha, beta, gamma)
         self.baseline_quality = 0.3  # Conservative baseline
         
@@ -347,7 +433,7 @@ class StableQualityMetric(QualityMetric):
         )
         
         # PHASE 1: Pure exploration (rounds 0-15)
-        if round_num < 10:
+        if round_num < 15:
             # Almost uniform quality during exploration
             exploration_quality = 0.4 + 0.2 * np.random.random()  # Random between 0.4-0.6
             
@@ -357,7 +443,7 @@ class StableQualityMetric(QualityMetric):
             
         # PHASE 2: Gradual transition (rounds 10-30)
         elif round_num < 30:
-            transition_weight = (round_num - 10) / 10  # 0 to 1
+            transition_weight = (round_num - 15) / 15  # 0 to 1
             exploration_component = (1 - transition_weight) * 0.5
             quality_component = transition_weight * base_quality
             
@@ -415,10 +501,10 @@ class StableQualityMetric(QualityMetric):
     
     def get_phase_info(self, round_num):
         """Helper to understand which phase we're in"""
-        if round_num < 10:
+        if round_num < 15:
             return "EXPLORATION", f"Pure random selection for diversity"
         elif round_num < 30:
-            weight = (round_num - 10) / 10
+            weight = (round_num - 15) / 15
             return "TRANSITION", f"Mixing random ({100*(1-weight):.0f}%) + quality ({100*weight:.0f}%)"
         else:
             return "QUALITY_BASED", f"Full quality-based selection with diversity bonus"

@@ -375,15 +375,102 @@ def cifar10_dirichlet(dataset, num_users, alpha=0.5, min_samples_per_user=20):
     dict_users = ensure_min_samples(dict_users, dataset, min_samples_per_user)
     
     return dict_users
+# ...existing imports and functions...
+
+def cifar100_enhanced_noniid(dataset, num_users, alpha=0.3, classes_per_user=10):
+    """
+    Enhanced CIFAR-100 non-IID sampling with controlled class distribution
+    """
+    labels = np.array(dataset.targets)
+    num_classes = 100
+    
+    # Group samples by class
+    class_indices = [np.where(labels == c)[0] for c in range(num_classes)]
+    
+    dict_users = {i: np.array([], dtype=np.int32) for i in range(num_users)}
+    
+    # Assign primary classes to each user
+    user_classes = {}
+    
+    for user_idx in range(num_users):
+        start_class = (user_idx * classes_per_user) % num_classes
+        user_primary_classes = []
+        
+        for i in range(classes_per_user):
+            class_idx = (start_class + i) % num_classes
+            user_primary_classes.append(class_idx)
+        
+        user_classes[user_idx] = user_primary_classes
+    
+    # Distribute samples within assigned classes using Dirichlet
+    for class_idx in range(num_classes):
+        class_samples = class_indices[class_idx].copy()
+        np.random.shuffle(class_samples)
+        
+        eligible_users = [u for u, classes in user_classes.items() if class_idx in classes]
+        
+        if not eligible_users:
+            eligible_users = [class_idx % num_users]
+        
+        proportions = np.random.dirichlet([alpha] * len(eligible_users))
+        counts = (proportions * len(class_samples)).astype(np.int32)
+        
+        # Handle rounding
+        diff = len(class_samples) - counts.sum()
+        if diff != 0:
+            if diff > 0:
+                adjust_indices = np.random.choice(len(eligible_users), diff, replace=True)
+                for idx in adjust_indices:
+                    counts[idx] += 1
+            else:
+                for _ in range(-diff):
+                    max_idx = np.argmax(counts)
+                    if counts[max_idx] > 0:
+                        counts[max_idx] -= 1
+        
+        # Distribute samples
+        start_idx = 0
+        for i, user_idx in enumerate(eligible_users):
+            if counts[i] > 0:
+                end_idx = start_idx + counts[i]
+                user_samples = class_samples[start_idx:end_idx]
+                dict_users[user_idx] = np.concatenate([dict_users[user_idx], user_samples])
+                start_idx = end_idx
+    
+    # Ensure minimum samples per user
+    min_samples = 50
+    for i in range(num_users):
+        if len(dict_users[i]) < min_samples:
+            # Get some random samples to reach minimum
+            all_indices = np.arange(len(dataset))
+            available = np.setdiff1d(all_indices, dict_users[i])
+            if len(available) > 0:
+                needed = min_samples - len(dict_users[i])
+                additional = np.random.choice(available, min(needed, len(available)), replace=False)
+                dict_users[i] = np.concatenate([dict_users[i], additional])
+    
+    return dict_users
 
 def cifar100_iid(dataset, num_users):
     """
-    Sample I.I.D. client data from CIFAR-100 dataset
-    :param dataset: CIFAR-100 dataset
-    :param num_users: number of users
-    :return: dict of image indices for each user
+    Sample I.I.D. client data from CIFAR100 dataset
     """
-    return cifar10_iid(dataset, num_users)  # Same logic for IID
+    num_items = int(len(dataset)/num_users)
+    dict_users, all_idxs = {}, [i for i in range(len(dataset))]
+    for i in range(num_users):
+        dict_users[i] = set(np.random.choice(all_idxs, num_items,
+                                             replace=False))
+        all_idxs = list(set(all_idxs) - dict_users[i])
+    return dict_users
+
+# def cifar100_iid(dataset, num_users):
+#     """
+#     Sample I.I.D. client data from CIFAR-100 dataset
+#     :param dataset: CIFAR-100 dataset
+#     :param num_users: number of users
+#     :return: dict of image indices for each user
+#     """
+#     return cifar10_iid(dataset, num_users)  # Same logic for IID
 
 def cifar100_dirichlet(dataset, num_users, alpha=0.5, min_samples_per_user=30):
     """
