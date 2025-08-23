@@ -173,9 +173,8 @@ def run_scaffold(args):
         
         # Print progress
         if (epoch + 1) % print_every == 0:
-            print(f'\nGlobal Round: {epoch+1}')
-            print(f'Average Local Training Loss: {loss_avg:.3f}')
-            print(f'Test Accuracy: {100*test_acc_current:.2f}%')
+            test_acc, _ = test_inference(args, global_model, test_dataset)
+            print(f"Round {epoch+1}: Train Accuracy = {train_accuracy[-1]*100:.2f}%, Test Accuracy = {test_acc*100:.2f}%, Loss = {loss_avg:.4f}")
             
             # Check control variate magnitudes for monitoring
             c_global_norm = 0
@@ -224,10 +223,7 @@ def run_scaffold(args):
     
     # Final test accuracy
     test_acc_final, test_loss_final = test_inference(args, global_model, test_dataset)
-    
-    print(f'\n\nResults after {args.epochs} global rounds:')
-    print(f'Test Accuracy: {100*test_acc_final:.2f}%')
-    print(f'Test Loss: {test_loss_final:.3f}')
+    print(f"Final Test Accuracy: {test_acc_final*100:.2f}%")
     
     total_time = time.time() - start_time
     print(f'\nTotal Runtime: {total_time:.0f}s')
@@ -314,4 +310,5 @@ if __name__ == '__main__':
     
     # Save model if needed
     if hasattr(args, 'save_model') and args.save_model:
+
         torch.save(model.state_dict(), f'./save/scaffold_{args.dataset}_{args.model}_epochs{args.epochs}.pth')
