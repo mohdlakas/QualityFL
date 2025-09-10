@@ -1,0 +1,38 @@
+# Data directories
+src/data/
+data/
+*.tar.gz
+
+# Dataset files
+*.json
+*.meta
+*_batch*
+*.html
+*.txt~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+
+# Logs and saves
+logs/
+save/
+src/logs/
+src/save/
+
+# IDE
+.vscode/
+.idea/
+
+# Specific files to ignore
+src/centralizedFemnist.py
+src/run2.sh
+src/Algorithms/auto_compare*.py
+src/Algorithms/test.sh
+README.md
+requirements.txt
