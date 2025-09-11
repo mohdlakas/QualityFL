@@ -57,7 +57,7 @@ src/
 ├── embedding_generator.py      # Parameter embedding generation
 ├── memory_bank.py              # FAISS-based memory system
 ├── intelligent_selector.py     # Client selection algorithms
-├── quality_metric2.py          # Quality assessment metrics
+├── quality_metric.py          # Quality assessment metrics
 ├── update.py                   # Optimized local client updates
 ├── models.py                   # Neural network architectures
 ├── options.py                  # Command line arguments
