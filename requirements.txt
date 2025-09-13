@@ -1,0 +1,8 @@
+faiss-cpu>=1.11.0
+matplotlib>=3.10.0
+numpy>=2.2.0
+scipy>=1.15.0
+tensorboardX>=2.6.0
+torch>=2.8.0
+torchvision>=0.23.0
+tqdm>=4.67.0
