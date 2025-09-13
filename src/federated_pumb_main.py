@@ -147,7 +147,7 @@ if __name__ == '__main__':
     
     train_loss, train_accuracy = [], []
     test_accuracy_history = []
-    print_every = 2
+
 
     for epoch in tqdm(range(args.epochs)):
         round_start_time = time.time()  # Track round time
