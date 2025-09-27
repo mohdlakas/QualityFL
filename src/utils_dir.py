@@ -711,33 +711,85 @@ class ComprehensiveAnalyzer:
             self.test_accuracies = []
         self.test_accuracies.append(accuracy)
 
-    def calculate_convergence_metrics(self, target_ratio=0.8):
-        """Calculate convergence speed and stability metrics."""
-        if len(self.train_accuracies) == 0:
-            return {}
+    # def calculate_convergence_metrics(self, target_ratio=0.8):
+    #     """Calculate convergence speed and stability metrics based on test accuracy."""
+    #     # Use test accuracy if available, otherwise fall back to training accuracy
+    #     if hasattr(self, 'test_accuracies') and len(self.test_accuracies) > 0:
+    #         # test_accuracies is stored as [(round_num, acc), ...] tuples
+    #         test_acc_values = [acc for round_num, acc in self.test_accuracies]
+    #         accuracy_source = "test"
+    #         accuracies = test_acc_values
+    #     elif len(self.train_accuracies) > 0:
+    #         accuracy_source = "training"
+    #         accuracies = self.train_accuracies
+    #         print("Warning: Using training accuracy for convergence (test accuracy not available)")
+    #     else:
+    #         return {}
             
-        self.final_accuracy = self.train_accuracies[-1]
-        target_accuracy = target_ratio * self.final_accuracy
+    #     self.final_accuracy = accuracies[-1]
+    #     target_accuracy = target_ratio * self.final_accuracy
         
-        # Find convergence round (first round to reach target)
-        for i, acc in enumerate(self.train_accuracies):
-            if acc >= target_accuracy:
-                self.convergence_round = i + 1
-                break
+    #     # Find convergence round (first round to reach target)
+    #     convergence_round = None
+    #     for i, acc in enumerate(accuracies):
+    #         if acc >= target_accuracy:
+    #             convergence_round = i + 1
+    #             break
                 
-        # Training stability (std of last 10 rounds)
-        stability_window = min(10, len(self.train_accuracies))
-        last_accuracies = self.train_accuracies[-stability_window:]
-        training_stability = np.std(last_accuracies)
+    #     # Test accuracy stability (std of last 10 rounds)
+    #     stability_window = min(10, len(accuracies))
+    #     last_accuracies = accuracies[-stability_window:]
+    #     accuracy_stability = np.std(last_accuracies)
         
+    #     return {
+    #         'final_accuracy': self.final_accuracy,
+    #         'convergence_round': convergence_round or len(accuracies),
+    #         'accuracy_stability': accuracy_stability,
+    #         'convergence_target': target_accuracy,
+    #         'target_ratio': target_ratio,
+    #         'accuracy_source': accuracy_source,  # Track which accuracy was used
+    #         'total_rounds_analyzed': len(accuracies)
+    #     }
+    
+    def calculate_convergence_metrics(self, target_ratio=0.8, use_max=False, stability_window=10):
+        """Calculate convergence speed and stability metrics based on accuracy."""
+
+        # Pick accuracy source
+        if hasattr(self, 'test_accuracies') and self.test_accuracies:
+            accuracies = [acc for _, acc in self.test_accuracies]
+            accuracy_source = "test"
+        elif getattr(self, 'train_accuracies', []):
+            accuracies = self.train_accuracies
+            accuracy_source = "training"
+            print("Warning: Using training accuracy for convergence (test accuracy not available)")
+        else:
+            return {}
+
+        # Compute target accuracy
+        self.final_accuracy = accuracies[-1]
+        ref_accuracy = max(accuracies) if use_max else self.final_accuracy
+        target_accuracy = target_ratio * ref_accuracy
+
+        # Find convergence round
+        convergence_round = next((i+1 for i, acc in enumerate(accuracies) if acc >= target_accuracy), None)
+
+        # Stability of last N rounds
+        window = min(stability_window, len(accuracies))
+        last_accuracies = accuracies[-window:]
+        accuracy_stability = np.std(last_accuracies)
+        mean_last = np.mean(last_accuracies)
+
         return {
             'final_accuracy': self.final_accuracy,
-            'convergence_round': self.convergence_round or len(self.train_accuracies),
-            'training_stability': training_stability,
+            'convergence_round': convergence_round,  # keep None if never reached
+            'accuracy_stability': accuracy_stability,
+            'mean_last': mean_last,
             'convergence_target': target_accuracy,
-            'target_ratio': target_ratio
+            'target_ratio': target_ratio,
+            'accuracy_source': accuracy_source,
+            'total_rounds_analyzed': len(accuracies),
         }
-    
+
     def analyze_client_selection_quality(self):
         """Analyze client selection patterns and quality."""
         if not self.client_selections:
@@ -995,7 +1047,8 @@ def write_comprehensive_analysis(analyzer, args, test_acc, total_time, filename,
         else:
             f.write("Convergence Speed: Not calculated (insufficient convergence data)\n")
         
-        f.write(f"Training Stability: {perf.get('training_stability', 0.0):.6f} (std of last 10 rounds)\n")
+        #f.write(f"Training Stability: {perf.get('training_stability', 0.0):.6f} (std of last 10 rounds)\n")
+        f.write(f"Accuracy Stability ({perf.get('accuracy_source', 'unknown')}): {perf.get('accuracy_stability', 0.0):.6f} (std of last 10 rounds)\n")
         f.write(f"Total Accuracy Improvement: {perf.get('accuracy_improvement', 0.0):.4f}\n")
         f.write(f"Average Round Time: {perf.get('avg_round_time', 0.0):.2f} seconds\n")
         f.write("\n")
@@ -1161,7 +1214,8 @@ def write_fedavg_comprehensive_analysis(analyzer, args, test_acc, total_time, fi
         else:
             f.write("Convergence Speed: Not calculated (insufficient convergence data)\n")
         
-        f.write(f"Training Stability: {perf.get('training_stability', 0.0):.6f} (std of last 10 rounds)\n")
+        #f.write(f"Training Stability: {perf.get('training_stability', 0.0):.6f} (std of last 10 rounds)\n")
+        f.write(f"Accuracy Stability ({perf.get('accuracy_source', 'unknown')}): {perf.get('accuracy_stability', 0.0):.6f} (std of last 10 rounds)\n")
         f.write(f"Total Accuracy Improvement: {perf.get('accuracy_improvement', 0.0):.4f}\n")
         f.write(f"Average Round Time: {perf.get('avg_round_time', 0.0):.2f} seconds\n")
         f.write("\n")
@@ -1381,4 +1435,5 @@ def write_scaffold_comprehensive_analysis(analyzer, args, final_test_acc, total_
         f.write("="*80 + "\n")
         f.write("END OF SCAFFOLD COMPREHENSIVE ANALYSIS\n")
         f.write("="*80 + "\n")
+
 
